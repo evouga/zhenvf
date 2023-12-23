@@ -101,19 +101,55 @@ void makeDisk(double triArea, Eigen::MatrixXd& V, Eigen::MatrixXi& F, Eigen::Mat
     }
 }
 
+static bool serializeMatrix(const Eigen::MatrixXd& mat, const std::string& filepath, int vector_per_element) {
+    try {
+        std::ofstream outFile(filepath, std::ios::binary);
+        if (!outFile.is_open()) {
+            std::cerr << "Error: Unable to open file for writing: " << filepath << std::endl;
+            return false;
+        }
+
+        // Write matrix rows and cols
+        int rows = static_cast<int>(mat.rows());
+        int cols = static_cast<int>(mat.cols());
+        int vpe = static_cast<int>(vector_per_element);
+
+
+        outFile.write("FRA 2", sizeof("FRA 2"));
+        outFile.write(reinterpret_cast<const char*>(&rows), sizeof(int));
+        outFile.write(reinterpret_cast<const char*>(&cols), sizeof(int));
+        outFile.write(reinterpret_cast<const char*>(&vpe), sizeof(int));
+
+        // Write matrix data
+        outFile.write(reinterpret_cast<const char*>(mat.data()), rows * cols * sizeof(double));
+        outFile.close();
+        return true;
+    }
+    catch (const std::exception& e) {
+        std::cerr << "Error: Unable to serialize matrix: " << e.what() << std::endl;
+        return false;
+    }
+}
+
 void exportExample(const std::string& filename, const Eigen::MatrixXd& V, const Eigen::MatrixXi& F, const Eigen::MatrixXd& VF)
 {
     std::string objname = filename + ".obj";
-    igl::writeOBJ(objname, V, F);
+    Eigen::MatrixXd V3d(V.rows(), 3);
+    V3d.col(0) = V.col(0);
+    V3d.col(1) = V.col(1);
+    V3d.col(2).setZero();
+    igl::writeOBJ(objname, V3d, F);
 
     std::string bfraname = filename + ".bfra";
-    std::ofstream ofs(bfraname);
+
+    serializeMatrix(VF, bfraname, 1);
+    /*std::ofstream ofs(bfraname);
     ofs << "FRA 2" << std::endl;
     ofs << F.rows() << " " << 2 << " " << 1 << std::endl;
     for (int i = 0; i < F.rows(); i++)
     {
         ofs << VF(i, 0) << ", " << VF(i, 1) << std::endl;
-    }
+    }*/
 }
 
 namespace ImGui
