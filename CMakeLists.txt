@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.0.0)
 
-project("libIGL polyscope example project")
+project("Zhen vector fields")
 
 # Maybe stop from CMAKEing in the wrong place
 if (CMAKE_BINARY_DIR STREQUAL CMAKE_SOURCE_DIR)
@@ -11,6 +11,9 @@ endif()
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+list(PREPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+
 
 ### Compiler options
 set( CMAKE_EXPORT_COMPILE_COMMANDS 1 ) # Emit a compile flags file to support completion engines 
@@ -44,6 +47,7 @@ elseif ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
   message("Using Visual Studio compiler flags")
   set(BASE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /W4")
   set(BASE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP") # parallel build
+  set(BASE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /bigobj")
   SET(DISABLED_WARNINGS "${DISABLED_WARNINGS} /wd\"4267\"")  # ignore conversion to smaller type (fires more aggressively than the gcc version, which is annoying)
   SET(DISABLED_WARNINGS "${DISABLED_WARNINGS} /wd\"4244\"")  # ignore conversion to smaller type (fires more aggressively than the gcc version, which is annoying)
   SET(DISABLED_WARNINGS "${DISABLED_WARNINGS} /wd\"4305\"")  # ignore truncation on initialization
@@ -60,32 +64,18 @@ else()
   message( FATAL_ERROR "Unrecognized compiler [${CMAKE_CXX_COMPILER_ID}]" )
 endif()
 
-# Find Eigen
-find_package(Eigen3 3.3 REQUIRED NO_MODULE)
-
 # Add polyscope
 message("\n\n == CMAKE recursively building Polyscope\n")
 add_subdirectory("deps/polyscope")
 
-# Add libIGL
-# With these lines commented out, we use libIGL in "header only" mode.  Uncomment to recurse and get the full package.
-# (and see the libIGL build documentation)
-#message("\n\n == CMAKE recursively building libIGL\n")
-#set(LIBIGL_WITH_EMBREE            OFF CACHE BOOL "Use Embree")
-#set(LIBIGL_WITH_OPENGL            OFF CACHE BOOL "Use OpenGL")
-#set(LIBIGL_WITH_OPENGL            OFF CACHE BOOL "Use OpenGL")
-#set(LIBIGL_WITH_OPENGL_GLFW       OFF CACHE BOOL "Use GLFW"  )
-#set(LIBIGL_WITH_OPENGL_GLFW_IMGUI OFF CACHE BOOL "Use ImGui" )
-#add_subdirectory("deps/libIGL")
-
 # Create an executable
 add_executable(
-        libIGL-polyscope-example
+	zhenvf
         src/main.cpp
         )
 
-# Include settings
-target_include_directories(libIGL-polyscope-example PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/deps/libigl/include")
+include(libigl)
+igl_include(restricted triangle)
 
 # Link settings
-target_link_libraries(libIGL-polyscope-example polyscope Eigen3::Eigen)
+target_link_libraries(zhenvf polyscope igl_restricted::triangle)

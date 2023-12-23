@@ -19,153 +19,200 @@
 #include <iostream>
 #include <unordered_set>
 #include <utility>
+#include <cmath>
 
-#include "args/args.hxx"
-#include "json/json.hpp"
+#include <igl/triangle/triangulate.h>
+#include <sstream>
+#include <igl/writeOBJ.h>
+#include <misc/cpp/imgui_stdlib.h>
 
-// The mesh, Eigen representation
-Eigen::MatrixXd meshV;
-Eigen::MatrixXi meshF;
+constexpr double PI = 3.1415926535898;
 
-// Options for algorithms
-int iVertexSource = 7;
-
-void addCurvatureScalar() {
-  using namespace Eigen;
-  using namespace std;
-
-  VectorXd K;
-  igl::gaussian_curvature(meshV, meshF, K);
-  SparseMatrix<double> M, Minv;
-  igl::massmatrix(meshV, meshF, igl::MASSMATRIX_TYPE_DEFAULT, M);
-  igl::invert_diag(M, Minv);
-  K = (Minv * K).eval();
-
-  polyscope::getSurfaceMesh("input mesh")
-      ->addVertexScalarQuantity("gaussian curvature", K,
-                                polyscope::DataType::SYMMETRIC);
+double potential(Eigen::Vector2d p, bool wrap)
+{
+    double r = p.norm();
+    double theta = std::atan2(p[1], p[0]);
+    if (wrap && theta < 0)
+        theta += 2.0 * PI;
+    return 1.0 / 3.0 * r * r * (-9.0 * std::sin(theta / 2.0) + 5.0 * std::sin(3.0 * theta / 2.0));
 }
 
-void computeDistanceFrom() {
-  Eigen::VectorXi VS, FS, VT, FT;
-  // The selected vertex is the source
-  VS.resize(1);
-  VS << iVertexSource;
-  // All vertices are the targets
-  VT.setLinSpaced(meshV.rows(), 0, meshV.rows() - 1);
-  Eigen::VectorXd d;
-  igl::exact_geodesic(meshV, meshF, VS, FS, VT, FT, d);
+void makeDisk(double triArea, Eigen::MatrixXd& V, Eigen::MatrixXi& F, Eigen::MatrixXd &VF, double innerRadius, bool annulus)
+{
+    double seglen = std::sqrt(4.0 * triArea / std::sqrt(3.0));
+    int nsegs = std::max(3, int(2.0 * PI / seglen));
+    int innersegs = annulus ? std::max(3, int(2.0 * PI * innerRadius / seglen)) : 0;
 
-  polyscope::getSurfaceMesh("input mesh")
-      ->addVertexDistanceQuantity(
-          "distance from vertex " + std::to_string(iVertexSource), d);
+    int totsegs = nsegs + innersegs;
+
+    Eigen::MatrixXd inV(totsegs, 2);
+    Eigen::MatrixXd inE(totsegs, 2);
+    for (int i = 0; i < nsegs; i++)
+    {
+        inV(i, 0) = std::cos(2.0 * PI * i / nsegs);
+        inV(i, 1) = std::sin(2.0 * PI * i / nsegs);
+        inE(i, 0) = i;
+        inE(i, 1) = (i + 1) % nsegs;
+    }
+    for (int i = 0; i < innersegs; i++)
+    {
+        inV(nsegs + i, 0) = innerRadius * std::cos(2.0 * PI * i / innersegs);
+        inV(nsegs + i, 1) = innerRadius * std::sin(2.0 * PI * i / innersegs);
+        inE(nsegs + i, 0) = nsegs + i;
+        inE(nsegs + i, 1) = nsegs + ((i + 1) % innersegs);
+    }
+    Eigen::MatrixXd inH(0, 2);
+    if (annulus)
+    {
+        inH.resize(1, 2);
+        inH << 0, 0;
+    }
+    std::stringstream ss;
+    ss << "a" << std::setprecision(30) << std::fixed << triArea << "qDY";
+    Eigen::MatrixXd outV;    
+    igl::triangle::triangulate(inV, inE, inH, ss.str(), outV, F);
+    V.resize(outV.rows(), 3);
+    V.col(0) = outV.col(0);
+    V.col(1) = outV.col(1);
+
+    int nfaces = F.rows();
+    VF.resize(nfaces, 2);
+    for (int i = 0; i < nfaces; i++)
+    {
+        double pots[3];
+        bool hasneg = false;
+        bool haspos = false;
+        for (int j = 0; j < 3; j++)
+        {
+            double theta = std::atan2(outV(F(i, j), 1), outV(F(i, j), 1));
+            if (theta < 0)
+                hasneg = true;
+            else if (theta > 0)
+                haspos = true;
+        }
+        bool wrap = (hasneg && haspos);
+        for (int j = 0; j < 3; j++)
+            pots[j] = potential(outV.row(F(i, j)).transpose(), wrap);
+        Eigen::Matrix2d B;
+        B.row(0) = outV.row(F(i, 1)).transpose() - outV.row(F(i, 0)).transpose();
+        B.row(1) = outV.row(F(i, 2)).transpose() - outV.row(F(i, 0)).transpose();
+        Eigen::Vector2d w(pots[1] - pots[0], pots[2] - pots[0]);
+        VF.row(i) = (B.inverse() * w).transpose();
+    }
 }
 
-void computeParameterization() {
-  using namespace Eigen;
-  using namespace std;
+void exportExample(const std::string& filename, const Eigen::MatrixXd& V, const Eigen::MatrixXi& F, const Eigen::MatrixXd& VF)
+{
+    std::string objname = filename + ".obj";
+    igl::writeOBJ(objname, V, F);
 
-  // Fix two points on the boundary
-  VectorXi bnd, b(2, 1);
-  igl::boundary_loop(meshF, bnd);
-
-  if (bnd.size() == 0) {
-    polyscope::warning("mesh has no boundary, cannot parameterize");
-    return;
-  }
-
-  b(0) = bnd(0);
-  b(1) = bnd(round(bnd.size() / 2));
-  MatrixXd bc(2, 2);
-  bc << 0, 0, 1, 0;
-
-  // LSCM parametrization
-  Eigen::MatrixXd V_uv;
-  igl::lscm(meshV, meshF, b, bc, V_uv);
-
-  polyscope::getSurfaceMesh("input mesh")
-      ->addVertexParameterizationQuantity("LSCM parameterization", V_uv);
+    std::string bfraname = filename + ".bfra";
+    std::ofstream ofs(bfraname);
+    ofs << "FRA 2" << std::endl;
+    ofs << F.rows() << " " << 2 << " " << 1 << std::endl;
+    for (int i = 0; i < F.rows(); i++)
+    {
+        ofs << VF(i, 0) << ", " << VF(i, 1) << std::endl;
+    }
 }
 
-void computeNormals() {
-  Eigen::MatrixXd N_vertices;
-  igl::per_vertex_normals(meshV, meshF, N_vertices);
+namespace ImGui
+{
 
-  polyscope::getSurfaceMesh("input mesh")
-      ->addVertexVectorQuantity("libIGL vertex normals", N_vertices);
-}
+    struct InputTextCallback_UserData
+    {
+        std::string* Str;
+        ImGuiInputTextCallback  ChainCallback;
+        void* ChainCallbackUserData;
+    };
 
-void callback() {
+    static int InputTextCallback(ImGuiInputTextCallbackData* data)
+    {
+        InputTextCallback_UserData* user_data = (InputTextCallback_UserData*)data->UserData;
+        if (data->EventFlag == ImGuiInputTextFlags_CallbackResize)
+        {
+            // Resize string callback
+            // If for some reason we refuse the new length (BufTextLen) and/or capacity (BufSize) we need to set them back to what we want.
+            std::string* str = user_data->Str;
+            IM_ASSERT(data->Buf == str->c_str());
+            str->resize(data->BufTextLen);
+            data->Buf = (char*)str->c_str();
+        }
+        else if (user_data->ChainCallback)
+        {
+            // Forward to user callback, if any
+            data->UserData = user_data->ChainCallbackUserData;
+            return user_data->ChainCallback(data);
+        }
+        return 0;
+    }
 
-  static int numPoints = 2000;
-  static float param = 3.14;
+    bool ImGui::InputText(const char* label, std::string* str, ImGuiInputTextFlags flags, ImGuiInputTextCallback callback, void* user_data)
+    {
+        IM_ASSERT((flags & ImGuiInputTextFlags_CallbackResize) == 0);
+        flags |= ImGuiInputTextFlags_CallbackResize;
 
-  ImGui::PushItemWidth(100);
+        InputTextCallback_UserData cb_user_data;
+        cb_user_data.Str = str;
+        cb_user_data.ChainCallback = callback;
+        cb_user_data.ChainCallbackUserData = user_data;
+        return InputText(label, (char*)str->c_str(), str->capacity() + 1, flags, InputTextCallback, &cb_user_data);
+    }
+};
 
-  // Curvature
-  if (ImGui::Button("add curvature")) {
-    addCurvatureScalar();
-  }
-  
-  // Normals 
-  if (ImGui::Button("add normals")) {
-    computeNormals();
-  }
+int main(int argc, char** argv) {
 
-  // Param
-  if (ImGui::Button("add parameterization")) {
-    computeParameterization();
-  }
+    // Options
+    polyscope::options::autocenterStructures = true;
+    polyscope::view::windowWidth = 1024;
+    polyscope::view::windowHeight = 1024;
 
-  // Geodesics
-  if (ImGui::Button("compute distance")) {
-    computeDistanceFrom();
-  }
-  ImGui::SameLine();
-  ImGui::InputInt("source vertex", &iVertexSource);
+    Eigen::MatrixXd V;
+    Eigen::MatrixXi F;
+    Eigen::MatrixXd VF;
 
-  ImGui::PopItemWidth();
-}
+    // Initialize polyscope
+    polyscope::init();
+    polyscope::view::style = polyscope::view::NavigateStyle::Planar;
 
-int main(int argc, char **argv) {
-  // Configure the argument parser
-  args::ArgumentParser parser("A simple demo of Polyscope with libIGL.\nBy "
-                              "Nick Sharp (nsharp@cs.cmu.edu)",
-                              "");
-  args::Positional<std::string> inFile(parser, "mesh", "input mesh");
+    double triArea = 0.01;
+    double innerRadius = 0.1;
 
-  // Parse args
-  try {
-    parser.ParseCLI(argc, argv);
-  } catch (args::Help) {
-    std::cout << parser;
-    return 0;
-  } catch (args::ParseError e) {
-    std::cerr << e.what() << std::endl;
+    makeDisk(triArea, V, F, VF, innerRadius, false);
+    auto dmesh = polyscope::registerSurfaceMesh2D("Disk", V, F);
+    dmesh->edgeWidth = 1.0;
+    auto vf = dmesh->addFaceVectorQuantity2D("VF", VF);
+    vf->setEnabled(true);
 
-    std::cerr << parser;
-    return 1;
-  }
+    bool annulus = false;
 
-  // Options
-  polyscope::options::autocenterStructures = true;
-  polyscope::view::windowWidth = 1024;
-  polyscope::view::windowHeight = 1024;
+    std::string filename = "disk";
 
-  // Initialize polyscope
-  polyscope::init();
+    polyscope::state::userCallback = [&]()
+    {
+        ImGui::PushItemWidth(100);
 
-  std::string filename = args::get(inFile);
-  std::cout << "loading: " << filename << std::endl;
+        ImGui::InputDouble("Triangle Area", &triArea);
+        ImGui::InputDouble("Inner Radius", &innerRadius);
+        ImGui::SameLine();
+        ImGui::Checkbox("Make Annulus", &annulus);
 
-  // Read the mesh
-  igl::readOBJ(filename, meshV, meshF);
+        if (ImGui::Button("Recreate Mesh")) {
+            makeDisk(triArea, V, F, VF, innerRadius, annulus);
+            dmesh = polyscope::registerSurfaceMesh2D("Disk", V, F);
+            dmesh->edgeWidth = 1.0;
+            vf = dmesh->addFaceVectorQuantity2D("VF", VF);
+            vf->setEnabled(true);
+        }
 
-  // Register the mesh with Polyscope
-  polyscope::registerSurfaceMesh("input mesh", meshV, meshF);
+        ImGui::InputText("Base Name", &filename);
+        if (ImGui::Button("Export Example"))
+        {
+            exportExample(filename, V, F, VF);
+        }
 
-  // Add the callback
-  polyscope::state::userCallback = callback;
+        ImGui::PopItemWidth();
+    };
 
   // Show the gui
   polyscope::show();
